@@ -1,10 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { GoogleGenAI } = require('@google/genai');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 const Conversation = require('../models/Conversation');
-
-// Initialize Gemini API with new SDK
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // Get all conversations (with search support)
 router.get('/', async (req, res) => {
@@ -100,22 +97,21 @@ router.post('/:id/messages', async (req, res) => {
       return res.json(conversation);
     }
 
-    // Build conversation history for context
+    // Initialize Gemini inside handler so key is read at request time
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+
+    // Build history (all messages except the latest user message)
     const history = conversation.messages
-      .slice(0, -1) // exclude the latest user message we just added
+      .slice(0, -1)
       .map(msg => ({
-        role: msg.role === 'model' ? 'model' : 'user',
+        role: msg.role,
         parts: [{ text: msg.content }]
       }));
 
-    // Call Gemini API using new SDK
-    const chat = ai.chats.create({
-      model: 'gemini-2.0-flash',
-      history: history
-    });
-
-    const result = await chat.sendMessage({ message });
-    const aiResponseText = result.text;
+    const chat = model.startChat({ history });
+    const result = await chat.sendMessage(message);
+    const aiResponseText = result.response.text();
 
     // Add AI response
     conversation.messages.push({ role: 'model', content: aiResponseText });
