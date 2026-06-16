@@ -1,10 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { GoogleGenAI } = require('@google/genai');
 const Conversation = require('../models/Conversation');
 
-// Initialize Gemini API
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || 'dummy_key');
+// Initialize Gemini API with new SDK
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // Get all conversations (with search support)
 router.get('/', async (req, res) => {
@@ -13,7 +13,6 @@ router.get('/', async (req, res) => {
     let query = {};
 
     if (search) {
-      // Search conversation titles or message contents
       query = {
         $or: [
           { title: { $regex: search, $options: 'i' } },
@@ -25,8 +24,7 @@ router.get('/', async (req, res) => {
     const conversations = await Conversation.find(query)
       .sort({ updatedAt: -1 })
       .select('title messages createdAt updatedAt');
-    
-    // Format response to include preview of the last message
+
     const formatted = conversations.map(conv => ({
       _id: conv._id,
       title: conv.title,
@@ -72,7 +70,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-// Post a new message to a conversation (Interacts with Gemini API)
+// Post a new message to a conversation
 router.post('/:id/messages', async (req, res) => {
   try {
     const { message } = req.body;
@@ -85,56 +83,44 @@ router.post('/:id/messages', async (req, res) => {
       return res.status(404).json({ error: 'Conversation not found' });
     }
 
-    // Add user message to history
-    conversation.messages.push({
-      role: 'user',
-      content: message
-    });
+    // Add user message
+    conversation.messages.push({ role: 'user', content: message });
 
-    // Update conversation title if it's the first message and still has default title
+    // Auto-title on first message
     if (conversation.messages.filter(m => m.role === 'user').length === 1 && conversation.title === 'New Conversation') {
-      // Use the first few words of the user's message as the title
       const words = message.split(' ').slice(0, 5).join(' ');
       conversation.title = words.length > 30 ? words.slice(0, 27) + '...' : words;
     }
 
-    // Call Gemini API
+    // Check API key
     if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'your_gemini_api_key_here') {
-      // Return a simulated response if API key is not configured yet
       const fallbackResponse = `This is a simulated AI response. Please configure a valid GEMINI_API_KEY in the server/.env file. You asked: "${message}"`;
-      conversation.messages.push({
-        role: 'model',
-        content: fallbackResponse
-      });
+      conversation.messages.push({ role: 'model', content: fallbackResponse });
       await conversation.save();
       return res.json(conversation);
     }
 
-    // Retrieve chat history to pass to Gemini API for context
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-    
-    // Format chat history for Gemini API API
-    // Gemini expects: role: "user" | "model", parts: [{ text: "..." }]
-    const contents = conversation.messages.map(msg => ({
-      role: msg.role,
-      parts: [{ text: msg.content }]
-    }));
+    // Build conversation history for context
+    const history = conversation.messages
+      .slice(0, -1) // exclude the latest user message we just added
+      .map(msg => ({
+        role: msg.role === 'model' ? 'model' : 'user',
+        parts: [{ text: msg.content }]
+      }));
 
-    // Generate content
-    const chat = model.startChat({
-      history: contents.slice(0, contents.length - 1), // history excluding the latest user message
+    // Call Gemini API using new SDK
+    const chat = ai.chats.create({
+      model: 'gemini-2.0-flash',
+      history: history
     });
 
-    const result = await chat.sendMessage(message);
-    const aiResponseText = result.response.text();
+    const result = await chat.sendMessage({ message });
+    const aiResponseText = result.text;
 
-    // Add AI response to history
-    conversation.messages.push({
-      role: 'model',
-      content: aiResponseText
-    });
-
+    // Add AI response
+    conversation.messages.push({ role: 'model', content: aiResponseText });
     await conversation.save();
+
     res.json(conversation);
   } catch (error) {
     console.error('Error in chat generation:', error);
